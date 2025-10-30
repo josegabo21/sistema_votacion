@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sistema de Votación - Expoferia</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <!-- Fondos decorativos -->
+    <div class="background-circles">
+        <div class="circle circle-1"></div>
+        <div class="circle circle-2"></div>
+        <div class="circle circle-3"></div>
+        <div class="circle circle-4"></div>
+        <div class="circle circle-5"></div>
+    </div>
+    
+    <div class="container">
+        <header class="header">
+            <h1 class="logo-text">Sistema de Votación Expoferia</h1>
+            <p class="subtitle">Vota por el mejor proyecto de la 2da Expoferia de Ingeniería en Informática</p>
+        </header>
+        
+        <!-- Interfaz principal de votación -->
+        <div class="tabs">
+            <div class="tab active" data-tab="vote">Votar</div>
+            <div class="tab" data-tab="results">Resultados</div>
+        </div>
+        
+        <!-- Pestaña de Votación -->
+        <div id="vote" class="tab-content active">
+            <div class="card">
+                <h2>Elige el Mejor Proyecto</h2>
+                <p>Selecciona uno de los siguientes proyectos. Solo puedes votar una vez por dispositivo.</p>
+                
+                <div id="vote-options" class="vote-options">
+                    <!-- Las opciones de voto se cargarán aquí dinámicamente -->
+                </div>
+                
+                <div id="vote-message" class="alert"></div>
+                
+                <button id="submit-vote" style="margin-top: 30px;">
+                    Confirmar Voto
+                </button>
+            </div>
+        </div>
+        
+        <!-- Pestaña de Resultados -->
+        <div id="results" class="tab-content">
+            <div class="card">
+                
+                <!-- Acceso a resultados protegido por contraseña -->
+                <div id="results-login" style="margin: 30px 0;">
+                    <h3>Acceso a Resultados</h3>
+                    <p>Ingresa la contraseña para ver los resultados:</p>
+                    <div class="form-group" style="display: flex; gap: 10px; margin-top: 15px;">
+                        <input type="password" id="results-password" placeholder="Contraseña de resultados">
+                        <button id="results-login-btn" style="width: auto; padding: 12px 20px;">Ver Resultados</button>
+                    </div>
+                    <div id="results-login-message" class="alert" style="margin-top: 10px;"></div>
+                </div>
+                
+                <div id="results-content" style="display: none;">
+                    <div id="top-three" class="top-three">
+                        <!-- Top 3 se cargará aquí dinámicamente -->
+                    </div>
+                    
+                    <div id="results-container" class="results-container">
+                        <!-- Los resultados completos se cargarán aquí dinámicamente -->
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Acceso administrativo -->
+        <button class="admin-toggle" id="admin-toggle">🔧 Acceso Administrativo</button>
+        
+        <!-- Modal de Administración -->
+        <div id="admin-modal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2 class="modal-title">Panel de Administración</h2>
+                    <button class="close-modal">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <!-- Autenticación para panel administrativo -->
+                    <div id="admin-login">
+                        <h3>Acceso Administrativo</h3>
+                        <p>Ingresa la contraseña para acceder al panel de administración:</p>
+                        <div class="form-group" style="display: flex; gap: 10px; margin-top: 15px;">
+                            <input type="password" id="admin-password" placeholder="Contraseña de administración">
+                            <button id="login-btn" style="width: auto; padding: 12px 20px;">Acceder</button>
+                        </div>
+                        <div id="login-message" class="alert" style="margin-top: 10px;"></div>
+                    </div>
+                    
+                    <div id="admin-main" style="display: none;">
+                        <h3>Estadísticas de Votación</h3>
+                        <div id="admin-stats" class="stats-grid">
+                            <!-- Las estadísticas se cargarán aquí dinámicamente -->
+                        </div>
+
+                        <!-- 🔥 NUEVO: Switch para controlar resultados públicos -->
+                        <div class="switch-container">
+                            <div>
+                                <div class="switch-label">Resultados Públicos</div>
+                                <div class="switch-description">
+                                    Cuando está activado, los resultados son visibles sin contraseña
+                                </div>
+                                <div id="public-results-status" class="status-private">
+                                    Resultados PRIVADOS
+                                </div>
+                            </div>
+                            <label class="switch">
+                                <input type="checkbox" id="public-results-toggle">
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                        
+                        <h3>Gestión de Proyectos</h3>
+                        <form id="participant-form">
+                            <div class="form-group">
+                                <label for="participant-name">Nombre del proyecto:</label>
+                                <input type="text" id="participant-name" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="participant-description">Descripción:</label>
+                                <textarea id="participant-description" rows="3" required></textarea>
+                            </div>
+                            <div class="form-group">
+                                <label for="participant-image">Imagen del proyecto:</label>
+                                <div class="image-upload" id="image-upload">
+                                    <p>Haz clic para subir una imagen</p>
+                                    <input type="file" id="participant-image" accept="image/*" style="display: none;">
+                                </div>
+                                <img id="image-preview" class="image-preview" alt="Vista previa">
+                            </div>
+                            <button type="submit" class="btn-success">Agregar Proyecto</button>
+                        </form>
+                        
+                        <h3 style="margin-top: 30px;">Proyectos Registrados</h3>
+                        <div style="overflow-x: auto;">
+                            <table class="participants-table">
+                                <thead>
+                                    <tr>
+                                        <th>Imagen</th>
+                                        <th>Nombre</th>
+                                        <th>Descripción</th>
+                                        <th>Acciones</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="participants-list">
+                                    <!-- Los participantes se cargarán aquí dinámicamente -->
+                                </tbody>
+                            </table>
+                        </div>
+                        
+                        <button id="reset-votes" class="btn-danger" style="margin-top: 20px;">Reiniciar Votación</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="footer">
+            <p>Sistema de Votación - 2da Expoferia de Ingeniería en Informática &copy; 2025</p>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="js/script.js"></script>
+</body>
+</html>
