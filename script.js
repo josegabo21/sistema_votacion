@@ -13,12 +13,35 @@ const supabaseAdmin = window.supabase.createClient(SUPABASE_URL, SUPABASE_SERVIC
 const ADMIN_PASSWORD = "chupalo_12345678";
 const RESULTS_PASSWORD = "resultados_expoferia";
 
-// Cache para datos
-let participantsCache = null;
-let voteResultsCache = null;
-let appConfigCache = null;
-let lastCacheUpdate = 0;
-const CACHE_DURATION = 30000; // 30 segundos
+// Sistema de cache mejorado
+const cacheManager = {
+    participants: null,
+    voteResults: null,
+    appConfig: null,
+    lastFetch: {},
+    CACHE_DURATION: 120000, // 2 minutos para reducir peticiones
+
+    shouldRefresh(key) {
+        return !this[key] || (Date.now() - (this.lastFetch[key] || 0)) > this.CACHE_DURATION;
+    },
+
+    set(key, data) {
+        this[key] = data;
+        this.lastFetch[key] = Date.now();
+    },
+
+    clear() {
+        this.participants = null;
+        this.voteResults = null;
+        this.appConfig = null;
+        this.lastFetch = {};
+    },
+
+    clearKey(key) {
+        this[key] = null;
+        this.lastFetch[key] = 0;
+    }
+};
 
 // Elementos del DOM
 const adminModal = document.getElementById('admin-modal');
@@ -55,6 +78,8 @@ let currentImage = null;
 let editingParticipantId = null;
 let isLoading = false;
 let currentPublicResultsState = false;
+let retryCount = 0;
+const MAX_RETRIES = 3;
 
 // Generar un ID único para el votante
 function getVoterId() {
@@ -66,7 +91,7 @@ function getVoterId() {
     return voterId;
 }
 
-// Funciones de utilidad
+// Funciones de utilidad mejoradas
 function showMessage(element, message, type) {
     element.textContent = message;
     element.className = `alert alert-${type}`;
@@ -89,6 +114,19 @@ function showElement(element) {
     element.style.display = 'block';
 }
 
+// Función con reintentos automáticos
+async function withRetry(operation, maxRetries = MAX_RETRIES) {
+    for (let i = 0; i < maxRetries; i++) {
+        try {
+            return await operation();
+        } catch (error) {
+            if (i === maxRetries - 1) throw error;
+            console.log(`Reintento ${i + 1} después de error:`, error);
+            await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
+        }
+    }
+}
+
 // Funciones para manejo de imágenes
 function handleImageUpload(event) {
     const file = event.target.files[0];
@@ -105,36 +143,34 @@ function handleImageUpload(event) {
 
 // Funciones para configuración de la aplicación
 async function getAppConfig(forceRefresh = false) {
-    const now = Date.now();
-    
-    if (appConfigCache && !forceRefresh && (now - lastCacheUpdate) < CACHE_DURATION) {
-        return appConfigCache;
+    if (!forceRefresh && !cacheManager.shouldRefresh('appConfig')) {
+        return cacheManager.appConfig;
     }
     
     try {
-        const { data, error } = await supabase
-            .from('app_config')
-            .select('*')
-            .eq('id', '00000000-0000-0000-0000-000000000000')
-            .single();
+        const { data, error } = await withRetry(() => 
+            supabase
+                .from('app_config')
+                .select('*')
+                .eq('id', '00000000-0000-0000-0000-000000000000')
+                .single()
+        );
         
         if (error) {
-            // Si no existe la configuración, crear una por defecto
             if (error.code === 'PGRST116') {
-                const defaultConfig = { public_results: false };
                 await createDefaultConfig();
-                return defaultConfig;
+                return { public_results: false };
             }
             throw error;
         }
         
-        appConfigCache = data || { public_results: false };
-        currentPublicResultsState = appConfigCache.public_results;
-        lastCacheUpdate = now;
-        return appConfigCache;
+        const config = data || { public_results: false };
+        cacheManager.set('appConfig', config);
+        currentPublicResultsState = config.public_results;
+        return config;
     } catch (error) {
         console.error('Error loading app config:', error);
-        return { public_results: false };
+        return cacheManager.appConfig || { public_results: false };
     }
 }
 
@@ -150,7 +186,6 @@ async function createDefaultConfig() {
             ]);
         
         if (error) throw error;
-        console.log('Configuración por defecto creada');
     } catch (error) {
         console.error('Error creating default config:', error);
     }
@@ -161,31 +196,24 @@ async function updatePublicResultsStatus(isPublic) {
     isLoading = true;
     
     try {
-        const { error } = await supabaseAdmin
-            .from('app_config')
-            .update({ public_results: isPublic })
-            .eq('id', '00000000-0000-0000-0000-000000000000');
+        const { error } = await withRetry(() =>
+            supabaseAdmin
+                .from('app_config')
+                .update({ public_results: isPublic })
+                .eq('id', '00000000-0000-0000-0000-000000000000')
+        );
         
         if (error) throw error;
         
-        // Actualizar cache y estado
-        appConfigCache = { public_results: isPublic };
+        cacheManager.set('appConfig', { public_results: isPublic });
         currentPublicResultsState = isPublic;
-        
-        // Actualizar UI
         updatePublicResultsUI(isPublic);
         
         showMessage(voteMessage, `Resultados ${isPublic ? 'públicos' : 'privados'} configurados correctamente`, 'success');
         
-        // Si estamos en la pestaña de resultados, actualizar la vista
-        if (document.getElementById('results').classList.contains('active')) {
-            await handleResultsTabActivation();
-        }
-        
     } catch (error) {
         console.error('Error updating public results:', error);
-        showMessage(voteMessage, 'Error al actualizar configuración: ' + error.message, 'error');
-        // Revertir el toggle en caso de error
+        showMessage(voteMessage, 'Error al actualizar configuración', 'error');
         publicResultsToggle.checked = !isPublic;
     } finally {
         isLoading = false;
@@ -209,41 +237,39 @@ async function handleResultsTabActivation() {
     const config = await getAppConfig();
     
     if (config.public_results) {
-        // Si los resultados son públicos, mostrar directamente
         resultsLogin.style.display = 'none';
         resultsContent.style.display = 'block';
         await renderResults();
     } else {
-        // Si son privados, mostrar login
         resultsLogin.style.display = 'block';
         resultsContent.style.display = 'none';
     }
 }
 
-// Funciones para participantes con cache
+// Funciones para participantes con cache mejorado
 async function loadParticipants(forceRefresh = false) {
-    const now = Date.now();
-    
-    if (participantsCache && !forceRefresh && (now - lastCacheUpdate) < CACHE_DURATION) {
-        return participantsCache;
+    if (!forceRefresh && !cacheManager.shouldRefresh('participants')) {
+        return cacheManager.participants || [];
     }
     
     try {
         showLoading(participantsList);
-        const { data, error } = await supabase
-            .from('participants')
-            .select('*')
-            .order('created_at', { ascending: true });
+        const { data, error } = await withRetry(() =>
+            supabase
+                .from('participants')
+                .select('*')
+                .order('created_at', { ascending: true })
+        );
         
         if (error) throw error;
         
-        participantsCache = data || [];
-        lastCacheUpdate = now;
-        return participantsCache;
+        const participants = data || [];
+        cacheManager.set('participants', participants);
+        return participants;
     } catch (error) {
         console.error('Error loading participants:', error);
         showMessage(voteMessage, 'Error al cargar proyectos', 'error');
-        return [];
+        return cacheManager.participants || [];
     }
 }
 
@@ -252,34 +278,28 @@ async function addParticipant(name, description, image) {
     isLoading = true;
     
     try {
-        console.log('Agregando participante:', { name, description });
+        const { data, error } = await withRetry(() =>
+            supabaseAdmin
+                .from('participants')
+                .insert([
+                    { 
+                        name: name, 
+                        description: description,
+                        image_url: image
+                    }
+                ])
+                .select()
+        );
         
-        const { data, error } = await supabaseAdmin
-            .from('participants')
-            .insert([
-                { 
-                    name: name, 
-                    description: description,
-                    image_url: image
-                }
-            ])
-            .select();
+        if (error) throw error;
         
-        if (error) {
-            console.error('Error de Supabase:', error);
-            throw error;
-        }
-        
-        console.log('Participante agregado:', data);
         showMessage(voteMessage, 'Proyecto agregado correctamente', 'success');
         
-        // Invalidar cache
-        participantsCache = null;
-        voteResultsCache = null;
+        cacheManager.clearKey('participants');
+        cacheManager.clearKey('voteResults');
         
         await refreshAllData();
         
-        // Limpiar formulario
         document.getElementById('participant-name').value = '';
         document.getElementById('participant-description').value = '';
         imagePreview.style.display = 'none';
@@ -287,8 +307,8 @@ async function addParticipant(name, description, image) {
         participantImage.value = '';
         
     } catch (error) {
-        console.error('Error completo adding participant:', error);
-        showMessage(voteMessage, 'Error al agregar proyecto: ' + error.message, 'error');
+        console.error('Error adding participant:', error);
+        showMessage(voteMessage, 'Error al agregar proyecto', 'error');
     } finally {
         isLoading = false;
     }
@@ -299,8 +319,6 @@ async function updateParticipant(id, name, description, image) {
     isLoading = true;
     
     try {
-        console.log('Actualizando participante:', { id, name, description });
-        
         const updateData = { 
             name: name, 
             description: description
@@ -310,27 +328,26 @@ async function updateParticipant(id, name, description, image) {
             updateData.image_url = image;
         }
         
-        const { error } = await supabaseAdmin
-            .from('participants')
-            .update(updateData)
-            .eq('id', id);
+        const { error } = await withRetry(() =>
+            supabaseAdmin
+                .from('participants')
+                .update(updateData)
+                .eq('id', id)
+        );
         
         if (error) throw error;
         
         showMessage(voteMessage, 'Proyecto actualizado correctamente', 'success');
         
-        // Invalidar cache
-        participantsCache = null;
-        voteResultsCache = null;
+        cacheManager.clearKey('participants');
+        cacheManager.clearKey('voteResults');
         
         await refreshAllData();
-        
-        // Limpiar formulario y resetear estado
         resetParticipantForm();
         
     } catch (error) {
         console.error('Error updating participant:', error);
-        showMessage(voteMessage, 'Error al actualizar proyecto: ' + error.message, 'error');
+        showMessage(voteMessage, 'Error al actualizar proyecto', 'error');
     } finally {
         isLoading = false;
     }
@@ -343,26 +360,25 @@ async function deleteParticipant(id) {
     isLoading = true;
     
     try {
-        console.log('Eliminando participante:', id);
-        
-        const { error } = await supabaseAdmin
-            .from('participants')
-            .delete()
-            .eq('id', id);
+        const { error } = await withRetry(() =>
+            supabaseAdmin
+                .from('participants')
+                .delete()
+                .eq('id', id)
+        );
         
         if (error) throw error;
         
         showMessage(voteMessage, 'Proyecto eliminado correctamente', 'success');
         
-        // Invalidar cache
-        participantsCache = null;
-        voteResultsCache = null;
+        cacheManager.clearKey('participants');
+        cacheManager.clearKey('voteResults');
         
         await refreshAllData();
         
     } catch (error) {
         console.error('Error deleting participant:', error);
-        showMessage(voteMessage, 'Error al eliminar proyecto: ' + error.message, 'error');
+        showMessage(voteMessage, 'Error al eliminar proyecto', 'error');
     } finally {
         isLoading = false;
     }
@@ -376,7 +392,6 @@ function resetParticipantForm() {
     participantImage.value = '';
     editingParticipantId = null;
     
-    // Restaurar el botón
     const submitButton = participantForm.querySelector('button');
     submitButton.textContent = 'Agregar Proyecto';
     submitButton.className = 'btn-success';
@@ -412,7 +427,7 @@ function renderParticipants(participants) {
     });
 }
 
-// Funciones para votación
+// Funciones para votación optimizadas
 async function renderVoteOptions() {
     const participants = await loadParticipants();
     voteOptions.innerHTML = '';
@@ -425,7 +440,7 @@ async function renderVoteOptions() {
     
     submitVoteBtn.style.display = 'block';
     
-    // Verificar si ya votó (no bloqueante)
+    // Verificar voto de forma no bloqueante
     checkIfVoted().then(hasVoted => {
         if (hasVoted) {
             submitVoteBtn.disabled = true;
@@ -458,12 +473,10 @@ function renderVoteOptionsList(participants, hasVoted) {
         
         if (!hasVoted) {
             optionDiv.addEventListener('click', () => {
-                // Deseleccionar todas las opciones
                 document.querySelectorAll('.vote-option').forEach(opt => {
                     opt.classList.remove('selected');
                 });
                 
-                // Seleccionar la opción actual
                 optionDiv.classList.add('selected');
                 selectedOption = participant.id;
             });
@@ -479,11 +492,13 @@ function renderVoteOptionsList(participants, hasVoted) {
 async function checkIfVoted() {
     try {
         const voterId = getVoterId();
-        const { data, error } = await supabase
-            .from('votes')
-            .select('id')
-            .eq('voter_id', voterId)
-            .maybeSingle();
+        const { data, error } = await withRetry(() =>
+            supabase
+                .from('votes')
+                .select('id')
+                .eq('voter_id', voterId)
+                .maybeSingle()
+        );
         
         if (error) throw error;
         return !!data;
@@ -503,7 +518,6 @@ async function submitVote() {
     isLoading = true;
     
     try {
-        // Verificar si ya se ha votado
         const hasVoted = await checkIfVoted();
         if (hasVoted) {
             showMessage(voteMessage, 'Ya has emitido tu voto. Solo se permite un voto por dispositivo.', 'error');
@@ -511,56 +525,55 @@ async function submitVote() {
         }
         
         const voterId = getVoterId();
-        const { error } = await supabase
-            .from('votes')
-            .insert([
-                { 
-                    participant_id: selectedOption,
-                    voter_id: voterId
-                }
-            ]);
+        const { error } = await withRetry(() =>
+            supabase
+                .from('votes')
+                .insert([
+                    { 
+                        participant_id: selectedOption,
+                        voter_id: voterId
+                    }
+                ])
+        );
         
         if (error) throw error;
         
         showMessage(voteMessage, '¡Tu voto ha sido registrado correctamente!', 'success');
         
-        // Invalidar cache
-        voteResultsCache = null;
-        
+        cacheManager.clearKey('voteResults');
         await refreshAllData();
         
     } catch (error) {
         console.error('Error submitting vote:', error);
-        showMessage(voteMessage, 'Error al registrar el voto: ' + error.message, 'error');
+        showMessage(voteMessage, 'Error al registrar el voto', 'error');
     } finally {
         isLoading = false;
     }
 }
 
-// Funciones para resultados con cache
+// Funciones para resultados con cache mejorado
 async function getVoteResults(forceRefresh = false) {
-    const now = Date.now();
-    
-    if (voteResultsCache && !forceRefresh && (now - lastCacheUpdate) < CACHE_DURATION) {
-        return voteResultsCache;
+    if (!forceRefresh && !cacheManager.shouldRefresh('voteResults')) {
+        return cacheManager.voteResults || {};
     }
     
     try {
-        const { data, error } = await supabase
-            .from('votes')
-            .select(`
-                participant_id,
-                participants (
-                    id,
-                    name,
-                    description,
-                    image_url
-                )
-            `);
+        const { data, error } = await withRetry(() =>
+            supabase
+                .from('votes')
+                .select(`
+                    participant_id,
+                    participants (
+                        id,
+                        name,
+                        description,
+                        image_url
+                    )
+                `)
+        );
         
         if (error) throw error;
         
-        // Contar votos por participante
         const voteCounts = {};
         if (data) {
             data.forEach(vote => {
@@ -575,12 +588,11 @@ async function getVoteResults(forceRefresh = false) {
             });
         }
         
-        voteResultsCache = voteCounts;
-        lastCacheUpdate = now;
+        cacheManager.set('voteResults', voteCounts);
         return voteCounts;
     } catch (error) {
         console.error('Error getting vote results:', error);
-        return {};
+        return cacheManager.voteResults || {};
     }
 }
 
@@ -610,7 +622,6 @@ function renderResultsContent(voteCounts, participants) {
         return;
     }
     
-    // Preparar datos para ordenar
     const results = participants.map(participant => {
         const votesData = voteCounts[participant.id] || { votes: 0, participant: participant };
         return {
@@ -619,10 +630,7 @@ function renderResultsContent(voteCounts, participants) {
         };
     });
     
-    // Ordenar por número de votos (de mayor a menor)
     const sortedResults = results.sort((a, b) => b.votes - a.votes);
-    
-    // Calcular el total de votos
     const totalVotes = sortedResults.reduce((sum, result) => sum + result.votes, 0);
     
     // Mostrar top 3
@@ -678,12 +686,12 @@ function renderResultsContent(voteCounts, participants) {
     }
 }
 
-// Funciones para administración
+// Funciones para administración optimizadas
 async function renderAdminStats() {
     try {
         const [participants, votesData, config] = await Promise.all([
             loadParticipants(),
-            supabase.from('votes').select('id'),
+            withRetry(() => supabase.from('votes').select('id')),
             getAppConfig()
         ]);
         
@@ -705,7 +713,6 @@ async function renderAdminStats() {
             </div>
         `;
         
-        // Actualizar estado de resultados públicos
         updatePublicResultsUI(config.public_results);
         
     } catch (error) {
@@ -721,52 +728,61 @@ async function resetVotes() {
     isLoading = true;
     
     try {
-        const { error } = await supabaseAdmin
-            .from('votes')
-            .delete()
-            .neq('id', '00000000-0000-0000-0000-000000000000');
+        const { error } = await withRetry(() =>
+            supabaseAdmin
+                .from('votes')
+                .delete()
+                .neq('id', '00000000-0000-0000-0000-000000000000')
+        );
         
         if (error) throw error;
         
-        // Limpiar localStorage para permitir votar nuevamente
         localStorage.removeItem('voterId');
-        
-        // Invalidar cache
-        participantsCache = null;
-        voteResultsCache = null;
+        cacheManager.clear();
         
         await refreshAllData();
         showMessage(voteMessage, 'La votación ha sido reiniciada correctamente. Todos los votos han sido eliminados.', 'success');
         
     } catch (error) {
         console.error('Error resetting votes:', error);
-        showMessage(voteMessage, 'Error al reiniciar la votación: ' + error.message, 'error');
+        showMessage(voteMessage, 'Error al reiniciar la votación', 'error');
     } finally {
         isLoading = false;
     }
 }
 
-// Función para refrescar todos los datos de forma optimizada
+// Función principal para refrescar datos
 async function refreshAllData() {
+    if (isLoading) return;
+    isLoading = true;
+    
     try {
-        // Cargar datos en paralelo cuando sea posible
         const [participants, config] = await Promise.all([
-            loadParticipants(true), // force refresh
+            loadParticipants(true),
             getAppConfig(true)
         ]);
         
-        // Renderizar componentes de forma secuencial para mejor UX
         renderParticipants(participants);
         await renderVoteOptions();
         await renderAdminStats();
         
-        // Si estamos en la pestaña de resultados, actualizar la vista
         if (document.getElementById('results').classList.contains('active')) {
             await handleResultsTabActivation();
         }
         
+        retryCount = 0; // Resetear contador de reintentos en éxito
+        
     } catch (error) {
         console.error('Error refreshing data:', error);
+        retryCount++;
+        
+        if (retryCount <= MAX_RETRIES) {
+            setTimeout(() => refreshAllData(), 2000 * retryCount);
+        } else {
+            showMessage(voteMessage, 'Error de conexión. Recargue la página.', 'error');
+        }
+    } finally {
+        isLoading = false;
     }
 }
 
@@ -785,14 +801,13 @@ window.editParticipant = async function(id) {
         }
         editingParticipantId = id;
         
-        // Cambiar el texto del botón
         const submitButton = participantForm.querySelector('button');
         submitButton.textContent = 'Actualizar Proyecto';
         submitButton.className = 'btn-warning';
     }
 }
 
-// Sistema de pestañas y event listeners optimizados
+// Sistema de pestañas
 tabs.forEach(tab => {
     tab.addEventListener('click', async () => {
         const tabId = tab.getAttribute('data-tab');
@@ -803,14 +818,13 @@ tabs.forEach(tab => {
         tab.classList.add('active');
         document.getElementById(tabId).classList.add('active');
         
-        // Cargar datos específicos de la pestaña cuando se activa
         if (tabId === 'results') {
             await handleResultsTabActivation();
         }
     });
 });
 
-// Event listeners optimizados
+// Event listeners
 participantForm.addEventListener('submit', async function(e) {
     e.preventDefault();
     const name = document.getElementById('participant-name').value.trim();
@@ -871,24 +885,20 @@ resetVotesBtn.addEventListener('click', resetVotes);
 imageUpload.addEventListener('click', () => { participantImage.click(); });
 participantImage.addEventListener('change', handleImageUpload);
 
-// Event listener para el toggle de resultados públicos
 publicResultsToggle.addEventListener('change', function() {
     updatePublicResultsStatus(this.checked);
 });
 
 // Inicialización optimizada
 window.addEventListener('DOMContentLoaded', async () => {
-    console.log('Inicializando aplicación...');
+    console.log('Inicializando aplicación optimizada...');
     
-    // Mostrar contenido básico inmediatamente
     showLoading(participantsList);
     showLoading(voteOptions);
     
-    // Cargar configuración inicial
     const config = await getAppConfig();
     updatePublicResultsUI(config.public_results);
     
-    // Cargar datos iniciales de forma no bloqueante
     setTimeout(async () => {
         try {
             await refreshAllData();
@@ -899,7 +909,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     }, 100);
 });
 
-// Precarga de imágenes para mejor performance
+// Precarga de imágenes
 function preloadImages(participants) {
     participants.forEach(participant => {
         if (participant.image_url) {
